@@ -1,0 +1,4 @@
+krakenex
+pykrakenapi
+pandas
+ta
