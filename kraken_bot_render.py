@@ -1,95 +1,82 @@
 import os
+import time
 import krakenex
 from pykrakenapi import KrakenAPI
-import time
 import pandas as pd
 
-# Load API keys from environment variables
-API_KEY = os.getenv("KRAKEN_API_KEY")
-API_SECRET = os.getenv("KRAKEN_API_SECRET")
+# Environment variables for API credentials
+KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")
+KRAKEN_API_SECRET = os.environ.get("KRAKEN_API_SECRET")
 
-if not API_KEY or not API_SECRET:
+if not KRAKEN_API_KEY or not KRAKEN_API_SECRET:
     raise Exception("❌ Missing Kraken API credentials. Set KRAKEN_API_KEY and KRAKEN_API_SECRET in Render.")
 
 # Initialize Kraken API
-api = krakenex.API(key=API_KEY, secret=API_SECRET)
+api = krakenex.API(key=KRAKEN_API_KEY, secret=KRAKEN_API_SECRET)
 k = KrakenAPI(api)
 
-print("✅ Kraken trading bot initialized with stop-loss and take-profit support.")
+# Configuration
+TRADE_PAIR = "XBTUSD"
+BASE_ASSET = "USD"
+TRADE_ASSET = "XBT"
+MIN_BALANCE_USD = 5.0
+TAKE_PROFIT_PCT = 0.02   # 2% profit
+STOP_LOSS_PCT = 0.01     # 1% loss
+TRADE_INTERVAL = 60      # Check every 60 seconds
 
-# === SETTINGS ===
-PAIRS = ['XXBTZUSD', 'XETHZUSD']  # BTC/USD and ETH/USD
-INTERVAL = 1  # 1-minute interval
-TRADE_VOLUME = {
-    'XXBTZUSD': 0.001,
-    'XETHZUSD': 0.01
-}
-STOP_LOSS_PERCENT = 2.0     # 2% stop-loss
-TAKE_PROFIT_PERCENT = 5.0   # 5% take-profit
+def log(msg):
+    print(f"[LOG] {time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
-# Track open trades
-open_trades = {}
+def get_balance():
+    balance = k.get_account_balance()
+    usd = float(balance.loc[BASE_ASSET]["vol"]) if BASE_ASSET in balance.index else 0
+    xbt = float(balance.loc[TRADE_ASSET]["vol"]) if TRADE_ASSET in balance.index else 0
+    return usd, xbt
 
-def place_market_buy(pair, volume):
-    print(f"🚀 Buying {volume} of {pair}")
-    response = api.query_private('AddOrder', {
-        'pair': pair.replace('X', '').replace('Z', ''),
-        'type': 'buy',
-        'ordertype': 'market',
-        'volume': str(volume)
-    })
-    return response
+def get_price():
+    ohlc, _ = k.get_ohlc_data(TRADE_PAIR, interval=1)
+    return float(ohlc["close"].iloc[-1])
 
-def place_market_sell(pair, volume):
-    print(f"💰 Selling {volume} of {pair}")
-    response = api.query_private('AddOrder', {
-        'pair': pair.replace('X', '').replace('Z', ''),
-        'type': 'sell',
-        'ordertype': 'market',
-        'volume': str(volume)
-    })
-    return response
-
-# === MAIN LOOP ===
-while True:
+def place_order(order_type, volume):
     try:
-        for pair in PAIRS:
-            print(f"📈 Checking {pair}...")
-            ohlc, _ = k.get_ohlc_data(pair, interval=INTERVAL)
-            last_candle = ohlc.iloc[-1]
-
-            close_price = last_candle['close']
-            open_price = last_candle['open']
-            print(f"🕒 {pair} - Open: {open_price}, Close: {close_price}")
-
-            if pair not in open_trades:
-                if close_price > open_price:
-                    volume = TRADE_VOLUME.get(pair, 0.001)
-                    place_market_buy(pair, volume)
-                    open_trades[pair] = {
-                        'buy_price': close_price,
-                        'volume': volume
-                    }
-                    print(f"✅ Bought {pair} at {close_price}")
-            else:
-                trade = open_trades[pair]
-                buy_price = trade['buy_price']
-                volume = trade['volume']
-                stop_loss_price = buy_price * (1 - STOP_LOSS_PERCENT / 100)
-                take_profit_price = buy_price * (1 + TAKE_PROFIT_PERCENT / 100)
-
-                if close_price <= stop_loss_price:
-                    print(f"🛑 Stop-loss hit for {pair} at {close_price}")
-                    place_market_sell(pair, volume)
-                    del open_trades[pair]
-
-                elif close_price >= take_profit_price:
-                    print(f"🎯 Take-profit hit for {pair} at {close_price}")
-                    place_market_sell(pair, volume)
-                    del open_trades[pair]
-
+        log(f"Placing {order_type.upper()} order for {volume:.6f} {TRADE_ASSET}")
+        api.query_private("AddOrder", {
+            "pair": TRADE_PAIR,
+            "type": order_type,
+            "ordertype": "market",
+            "volume": str(volume)
+        })
     except Exception as e:
-        print("⚠️ Error:", e)
+        log(f"Order error: {e}")
 
-    print("⏳ Waiting 60 seconds...\n")
-    time.sleep(60)
+def trade():
+    usd_balance, xbt_balance = get_balance()
+    price = get_price()
+
+    if usd_balance > MIN_BALANCE_USD:
+        volume = usd_balance / price
+        place_order("buy", volume)
+        entry_price = price
+        log(f"Bought {volume:.6f} {TRADE_ASSET} at ${price:.2f}")
+
+        while True:
+            time.sleep(TRADE_INTERVAL)
+            current_price = get_price()
+            change_pct = (current_price - entry_price) / entry_price
+
+            if change_pct >= TAKE_PROFIT_PCT:
+                place_order("sell", volume)
+                log(f"💰 Take profit hit: Sold at ${current_price:.2f}")
+                break
+            elif change_pct <= -STOP_LOSS_PCT:
+                place_order("sell", volume)
+                log(f"🔻 Stop loss hit: Sold at ${current_price:.2f}")
+                break
+    else:
+        log("Not enough USD to place trade.")
+
+if __name__ == "__main__":
+    while True:
+        trade()
+        log("Waiting to reinvest profits...")
+        time.sleep(TRADE_INTERVAL)
