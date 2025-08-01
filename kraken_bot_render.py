@@ -4,6 +4,9 @@ import krakenex
 from pykrakenapi import KrakenAPI
 import pandas as pd
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message="'T' is deprecated")
+
 # API keys from Render environment
 KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.environ.get("KRAKEN_API_SECRET")
