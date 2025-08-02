@@ -63,40 +63,31 @@ def place_order(order_type, pair, volume):
         log(f"❌ Order error on {pair}: {e}")
 
 def trade():
-    balance = get_balance()
+    usd_balance, xbt_balance = get_balance()
+    price = get_price()
 
-    for pair, trade_asset, base_asset in TRADE_PAIRS:
-        time.sleep(2)  # avoid rate limit
-        usd_balance = balance.get(base_asset, 0)
-        asset_balance = balance.get(trade_asset, 0)
+    if usd_balance > MIN_BALANCE_USD:
+        volume = usd_balance / price
+        place_order("buy", volume)
+        entry_price = price
+        log(f"🟢 Bought {volume:.6f} {TRADE_ASSET} at ${entry_price:.2f}")
 
-        price = get_price(pair)
-        if not price:
-            continue
+        while True:
+            time.sleep(TRADE_INTERVAL)
+            current_price = get_price()
+            change_pct = (current_price - entry_price) / entry_price
+            log(f"🔍 Checking price: ${current_price:.2f} | Change: {change_pct:.2%}")
 
-        if usd_balance >= MIN_BALANCE_USD:
-            volume = usd_balance / price
-            place_order("buy", pair, volume)
-            entry_price = price
-            log(f"✅ Bought {volume:.6f} {trade_asset} at ${price:.2f}")
-
-            while True:
-                time.sleep(TRADE_INTERVAL)
-                current_price = get_price(pair)
-                if not current_price:
-                    continue
-
-                change = (current_price - entry_price) / entry_price
-                if change >= TAKE_PROFIT_PCT:
-                    place_order("sell", pair, volume)
-                    log(f"💰 Take Profit: Sold {trade_asset} at ${current_price:.2f}")
-                    break
-                elif change <= -STOP_LOSS_PCT:
-                    place_order("sell", pair, volume)
-                    log(f"🔻 Stop Loss: Sold {trade_asset} at ${current_price:.2f}")
-                    break
-        else:
-            log(f"⚠️ Not enough {base_asset} to trade {pair}")
+            if change_pct >= TAKE_PROFIT_PCT:
+                place_order("sell", volume)
+                log(f"💰 Take profit hit: Sold at ${current_price:.2f}")
+                break
+            elif change_pct <= -STOP_LOSS_PCT:
+                place_order("sell", volume)
+                log(f"🔻 Stop loss hit: Sold at ${current_price:.2f}")
+                break
+    else:
+        log("⚠️ Not enough USD to place trade.")
 
 if __name__ == "__main__":
     while True:
