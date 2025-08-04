@@ -1,64 +1,43 @@
-import os
 import time
-import warnings
-import krakenex
-from pykrakenapi import KrakenAPI
-import pandas as pd
+from kraken_api import KrakenAPI
 
-# Suppress 'T' frequency warning
-warnings.filterwarnings("ignore", category=FutureWarning, module="pykrakenapi")
+# === API Setup ===
+api = KrakenAPI()
 
-# API keys from Render environment
-KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")
-KRAKEN_API_SECRET = os.environ.get("KRAKEN_API_SECRET")
+# === CONFIG ===
+TRADE_PAIRS = [
+    ("XXBTZUSD", "XBT", "USD"),
+    ("XETHZUSD", "ETH", "USD"),
+    ("ADAUSD", "ADA", "USD"),
+    ("SOLUSD", "SOL", "USD"),
+    ("XLTCZUSD", "LTC", "USD"),
+    ("XXRPZUSD", "XRP", "USD"),
+    ("DOTUSD", "DOT", "USD"),
+    ("AVAXUSD", "AVAX", "USD")
+]
 
-if not KRAKEN_API_KEY or not KRAKEN_API_SECRET:
-    raise Exception("❌ Missing Kraken API credentials. Set KRAKEN_API_KEY and KRAKEN_API_SECRET in environment.")
-
-api = krakenex.API(key=KRAKEN_API_KEY, secret=KRAKEN_API_SECRET)
-k = KrakenAPI(api)
-
-# Config
-COIN_PAIRS = {
-    "XBTUSD": ("XBT", "USD"),
-    "ETHUSD": ("ETH", "USD"),
-    "SOLUSD": ("SOL", "USD"),
-    "ADAUSD": ("ADA", "USD"),
-    "AVAXUSD": ("AVAX", "USD"),
-    "MATICUSD": ("MATIC", "USD"),
-    "DOTUSD": ("DOT", "USD"),
-    "ATOMUSD": ("ATOM", "USD")
-}
-
-TRADE_INTERVAL = 60  # in seconds
+MIN_BALANCE_USD = 5.0
 TAKE_PROFIT_PCT = 0.02
 STOP_LOSS_PCT = 0.01
-MIN_USD_BALANCE = 5.0
-
-entry_prices = {}
+TRADE_INTERVAL = 60  # seconds
 
 def log(msg):
     print(f"[LOG] {time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
 def get_balance():
-    try:
-        balance = k.get_account_balance()
-        return {key: float(balance.loc[key]["vol"]) for key in balance.index}
-    except Exception as e:
-        log(f"❌ Error fetching balance: {e}")
-        return {}
+    balance = api.get_account_balance()
+    return {cur: float(balance[cur]["vol"]) for cur in balance}
 
 def get_price(pair):
     try:
-        ohlc, _ = k.get_ohlc_data(pair, interval=1)
+        ohlc, _ = api.get_ohlc_data(pair, interval=1)
         return float(ohlc["close"].iloc[-1])
     except Exception as e:
-        log(f"❌ Error fetching price for {pair}: {e}")
+        log(f"❌ Failed to get price for {pair}: {e}")
         return None
 
-def place_order(pair, order_type, volume):
+def place_order(order_type, pair, volume):
     try:
-        log(f"📈 Placing {order_type.upper()} order for {volume:.6f} on {pair}")
         api.query_private("AddOrder", {
             "pair": pair,
             "type": order_type,
@@ -66,41 +45,49 @@ def place_order(pair, order_type, volume):
             "volume": str(volume)
         })
     except Exception as e:
-        log(f"❌ Order failed for {pair}: {e}")
+        log(f"❌ Order error on {pair}: {e}")
 
-def trade(pair, base_asset, trade_asset):
+def trade():
     balances = get_balance()
-    price = get_price(pair)
-    if price is None:
-        return
 
-    usd_balance = balances.get(base_asset, 0)
-    coin_balance = balances.get(trade_asset, 0)
+    for pair, base, quote in TRADE_PAIRS:
+        log(f"🔄 Starting trade cycle for {pair}")
+        time.sleep(1.5)  # Prevent Kraken rate limit
 
-    if coin_balance > 0 and pair in entry_prices:
-        current_price = price
-        entry_price = entry_prices[pair]
-        change = (current_price - entry_price) / entry_price
+        usd_balance = balances.get(quote, 0)
+        base_balance = balances.get(base, 0)
 
-        log(f"📊 {pair}: Entry ${entry_price:.2f}, Now ${current_price:.2f} ({change*100:.2f}%)")
+        price = get_price(pair)
+        if price is None:
+            continue
 
-        if change >= TAKE_PROFIT_PCT:
-            place_order(pair, "sell", coin_balance)
-            log(f"✅ TAKE PROFIT on {pair} at ${current_price:.2f}")
-            del entry_prices[pair]
-        elif change <= -STOP_LOSS_PCT:
-            place_order(pair, "sell", coin_balance)
-            log(f"🛑 STOP LOSS on {pair} at ${current_price:.2f}")
-            del entry_prices[pair]
+        if usd_balance > MIN_BALANCE_USD:
+            volume = usd_balance / price
+            place_order("buy", pair, volume)
+            entry_price = price
+            log(f"🟢 Bought {volume:.6f} {base} at ${entry_price:.2f}")
 
-    elif usd_balance >= MIN_USD_BALANCE:
-        volume = usd_balance / price / len(COIN_PAIRS)
-        place_order(pair, "buy", volume)
-        entry_prices[pair] = price
-        log(f"🟢 BOUGHT {volume:.6f} {trade_asset} of {pair} at ${price:.2f}")
+            while True:
+                time.sleep(TRADE_INTERVAL)
+                current_price = get_price(pair)
+                if current_price is None:
+                    continue
+                change_pct = (current_price - entry_price) / entry_price
+                log(f"🔍 {pair} @ ${current_price:.2f} | Change: {change_pct:.2%}")
+
+                if change_pct >= TAKE_PROFIT_PCT:
+                    place_order("sell", pair, volume)
+                    log(f"💰 Take profit hit: Sold at ${current_price:.2f}")
+                    break
+                elif change_pct <= -STOP_LOSS_PCT:
+                    place_order("sell", pair, volume)
+                    log(f"🔻 Stop loss hit: Sold at ${current_price:.2f}")
+                    break
+        else:
+            log(f"⚠️ Not enough {quote} to trade {pair}.")
 
 if __name__ == "__main__":
     while True:
-        for pair, (coin, base) in COIN_PAIRS.items():
-            trade(pair, base, coin)
+        trade()
+        log("⏳ Cycle complete. Waiting for reinvest...")
         time.sleep(TRADE_INTERVAL)
